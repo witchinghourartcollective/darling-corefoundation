@@ -12,6 +12,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/syslimits.h>
+#include <sys/mount.h>
+#include <stdlib.h>
 
 extern const CFStringRef NSURLErrorKey;
 extern const CFStringRef NSFilePathErrorKey;
@@ -29,6 +31,8 @@ struct __CFURLEnumerator {
     CFArrayRef propertyKeys;
     CFMutableArrayRef urlStack;
     CFMutableArrayRef dirFileInfos;
+    CFMutableArrayRef mountedURLs;
+    CFIndex mountedIndex;
 };
 
 CFComparisonResult _compareFileInfo(const void *fileInfo1, const void *fileInfo2, void *context) {
@@ -39,7 +43,12 @@ CFComparisonResult _compareFileInfo(const void *fileInfo1, const void *fileInfo2
 
 static void __CFURLEnumeratorDeallocate(CFTypeRef cf) {
     struct __CFURLEnumerator *enumerator = (struct __CFURLEnumerator *)cf;
-    CFRelease(enumerator->directoryURL);
+    if (enumerator->directoryURL) {
+        CFRelease(enumerator->directoryURL);
+    }
+    if (enumerator->mountedURLs) {
+        CFRelease(enumerator->mountedURLs);
+    }
 
     if (enumerator->propertyKeys != NULL) {
         CFRelease(enumerator->propertyKeys);
@@ -222,6 +231,37 @@ CFURLEnumeratorRef CFURLEnumeratorCreateForDirectoryURL(CFAllocatorRef alloc, CF
     return (CFURLEnumeratorRef)enumerator;
 }
 
+CFURLEnumeratorRef CFURLEnumeratorCreateForMountedVolumes(CFAllocatorRef alloc, CFURLEnumeratorOptions option, CFArrayRef propertyKeys) {
+    int count = getfsstat(NULL, 0, MNT_NOWAIT);
+    if (count <= 0) return NULL;
+    struct statfs *mounts = calloc((size_t)count, sizeof(*mounts));
+    if (!mounts) return NULL;
+    count = getfsstat(mounts, (int)((size_t)count * sizeof(*mounts)), MNT_NOWAIT);
+    if (count < 0) {
+        free(mounts);
+        return NULL;
+    }
+    struct __CFURLEnumerator *enumerator = _CFURLEnumeratorCreate(alloc);
+    if (!enumerator) {
+        free(mounts);
+        return NULL;
+    }
+    enumerator->options = option;
+    enumerator->mountedIndex = 0;
+    enumerator->mountedURLs = CFArrayCreateMutable(alloc, 0, &kCFTypeArrayCallBacks);
+    if (propertyKeys) enumerator->propertyKeys = CFArrayCreateCopy(alloc, propertyKeys);
+    for (int i = 0; i < count; i++) {
+        if ((option & kCFURLEnumeratorSkipInvisibles) && (mounts[i].f_flags & MNT_DONTBROWSE)) continue;
+        CFURLRef url = CFURLCreateFromFileSystemRepresentation(alloc, (const UInt8 *)mounts[i].f_mntonname, strlen(mounts[i].f_mntonname), true);
+        if (url) {
+            CFArrayAppendValue(enumerator->mountedURLs, url);
+            CFRelease(url);
+        }
+    }
+    free(mounts);
+    return enumerator;
+}
+
 CFURLEnumeratorResult CFURLEnumeratorGetNextURL(CFURLEnumeratorRef enumer, CFURLRef *url, CFErrorRef *error) {
     struct __CFURLEnumerator *enumerator = (struct __CFURLEnumerator *)enumer;
     
@@ -231,6 +271,13 @@ CFURLEnumeratorResult CFURLEnumeratorGetNextURL(CFURLEnumeratorRef enumer, CFURL
 
     if (error != NULL) {
         *error = NULL;
+    }
+
+    if (enumerator->mountedURLs) {
+        if (enumerator->mountedIndex >= CFArrayGetCount(enumerator->mountedURLs)) return kCFURLEnumeratorEnd;
+        CFURLRef item = (CFURLRef)CFArrayGetValueAtIndex(enumerator->mountedURLs, enumerator->mountedIndex++);
+        if (url) *url = (CFURLRef)CFRetain(item);
+        return kCFURLEnumeratorSuccess;
     }
 
     CFIndex count = 0;
