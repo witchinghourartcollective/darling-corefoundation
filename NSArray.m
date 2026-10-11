@@ -30,6 +30,14 @@ CF_EXPORT CFDataRef _CFPropertyListCreateXMLData(CFAllocatorRef allocator, CFPro
 + (id)newWithContentsOf:(id)pathOrURL immutable:(BOOL)immutable;
 @end
 
+// Clang emits literal NSArray values as static objects with this layout. Keep
+// the ivar order in sync with CGObjCMac's __builtin_NSArray definition.
+@interface NSConstantArray : NSArray {
+    NSUInteger _count;
+    id const *_objects;
+}
+@end
+
 CF_PRIVATE
 @interface __NSPlaceholderArray : NSMutableArray
 + (id)mutablePlaceholder;
@@ -186,6 +194,32 @@ CF_PRIVATE
         return NO;
     }
     return [self isEqualToArray:other];
+}
+
+@end
+
+@implementation NSConstantArray
+
+SINGLETON_RR()
+
+- (NSUInteger)count
+{
+    return _count;
+}
+
+- (id)objectAtIndex:(NSUInteger)index
+{
+    if (index >= _count) {
+        [NSException raise:NSRangeException format:@"Index %lu beyond bounds [0 .. %lu]",
+            (unsigned long)index, (unsigned long)_count];
+        return nil;
+    }
+    return _objects[index];
+}
+
+- (id)copyWithZone:(NSZone *)zone
+{
+    return self;
 }
 
 @end
